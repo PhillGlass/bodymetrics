@@ -8,9 +8,7 @@ const DEFAULT_PROFILE = {
   activityLevel: 1.375,
 };
 
-/* Configurazione focus obiettivo
-   Wishnofsky (1958): 1 kg grasso ≈ 7.700 kcal
-   ACSM Position Stand: deficit sicuro 500-1000 kcal/giorno */
+// Configurazione focus obiettivo — fonti e derivazione dei valori: fonti.md § Deficit calorico e ritmo di dimagrimento
 const FOCUS_CONFIG = {
   gradual:    { label:'Graduale',  sub:'Sostenibile', rate:0.35, deficit:375,  color:'#22c55e' },
   moderate:   { label:'Moderato',  sub:'Consigliato', rate:0.60, deficit:625,  color:'#3b82f6' },
@@ -150,7 +148,8 @@ if (window["chartjs-plugin-annotation"]) {
   Chart.register(window["chartjs-plugin-annotation"]);
 }
 
-/* ─── CALCOLI ────────────────────────────────── */
+/* ─── CALCOLI ──────────────────────────────────
+   Fonti e derivazione di tutte le formule/soglie di questa sezione: fonti.md */
 function getAge(y) {
   return new Date().getFullYear() - y;
 }
@@ -159,19 +158,23 @@ function calcBMI(w, h) {
   return w / (m * m);
 }
 function getBMIInfo(bmi) {
+  // Soglie: fonti.md § BMI (classificazione OMS/WHO)
   if (bmi < 18.5) return { label: "Sottopeso", cls: "bmi-underweight" };
   if (bmi < 25) return { label: "Normopeso", cls: "bmi-normal" };
   if (bmi < 30) return { label: "Sovrappeso", cls: "bmi-overweight" };
   return { label: "Obesità", cls: "bmi-obese" };
 }
 function calcBMR(w, h, age, sex) {
+  // Equazione di Mifflin-St Jeor (1990) — fonti.md § BMR
   const b = 10 * w + 6.25 * h - 5 * age;
   return sex === "M" ? b + 5 : b - 161;
 }
 function calcTDEE(w, h, age, sex, act) {
+  // Fattore di attività (PAL) — fonti.md § TDEE
   return Math.round(calcBMR(w, h, age, sex) * act);
 }
 function calcFFMI(w, h, fatPct) {
+  // Fat-Free Mass Index — fonti.md § FFMI
   return (w * (1 - fatPct / 100)) / Math.pow(h / 100, 2);
 }
 function actLabel(v) {
@@ -659,6 +662,7 @@ function renderBodyCompChart() {
 }
 
 /* ─── CHART: RADAR ───────────────────────────── */
+// Range ideali per età/sesso (grasso, muscolo, acqua, FFMI) — fonti.md § Range ideali per età e sesso
 function getIdealRanges(age, sex) {
   const M = sex === "M";
   const fat = M
@@ -1691,10 +1695,8 @@ document.addEventListener("DOMContentLoaded", bootstrapAuth);
 
 /* ═══════════════════════════════════════════════
    OBIETTIVO — SISTEMA COMPLETO
-   Basi scientifiche:
-   • Wishnofsky (1958): 1 kg grasso ≈ 7.700 kcal
-   • ACSM Position Stand: deficit sicuro 500-1000 kcal/giorno
-   • Hall et al. (2012): adattamento metabolico
+   Basi scientifiche e derivazione dei valori: vedi fonti.md
+   (§ Deficit calorico e ritmo di dimagrimento, § Proiezione adattativa del calo peso)
 ═══════════════════════════════════════════════ */
 
 // Variabili stato obiettivo
@@ -1777,10 +1779,8 @@ function renderGoalModeChart() {
   const effectiveEnd = lastActualDate > projEnd ? lastActualDate : projEnd;
   const effectiveEndStr = effectiveEnd.toISOString().slice(0, 10);
 
-  // Proiezione adattativa (Hall et al. 2012):
-  // peso(t) = target + (start - target) * (1 - t/T)^1.4
-  // Esponente > 1 = decelerazione: calo più marcato all'inizio (acqua/glicogeno),
-  // via via più graduale verso il traguardo per adattamento metabolico (BMR che scende col peso)
+  // Proiezione adattativa: peso(t) = target + (start - target) * (1 - t/T)^1.4
+  // Fonte e motivazione dell'esponente: fonti.md § Proiezione adattativa del calo peso
   const proj = [];
   const steps = Math.max(1, Math.floor(totalDays / 60));
   for (let day = 0; day <= totalDays; day += steps) {
