@@ -8,11 +8,14 @@ const DEFAULT_PROFILE = {
   activityLevel: 1.375,
 };
 
+// Wishnofsky (1958): 1 kg di massa grassa ≈ 7700 kcal — fonti.md § Deficit calorico e ritmo di dimagrimento
+const KCAL_PER_KG_FAT = 7700;
+
 // Configurazione focus obiettivo — fonti e derivazione dei valori: fonti.md § Deficit calorico e ritmo di dimagrimento
 const FOCUS_CONFIG = {
-  gradual:    { label:'Graduale',  sub:'Sostenibile', rate:0.35, deficit:375,  color:'#22c55e' },
-  moderate:   { label:'Moderato',  sub:'Consigliato', rate:0.60, deficit:625,  color:'#3b82f6' },
-  aggressive: { label:'Intensivo', sub:'Impegnativo', rate:0.85, deficit:850,  color:'#f97316' },
+  gradual:    { label:'Graduale',  sub:'Sostenibile', deficit:375,  color:'#22c55e' },
+  moderate:   { label:'Moderato',  sub:'Consigliato', deficit:625,  color:'#3b82f6' },
+  aggressive: { label:'Intensivo', sub:'Impegnativo', deficit:850,  color:'#f97316' },
 };
 
 let state = {
@@ -677,19 +680,31 @@ function getIdealRanges(age, sex) {
         ? { min: 23, max: 34 }
         : { min: 24, max: 36 };
   const muscle = M
-    ? age < 40
-      ? { min: 40, max: 44 }
-      : age < 60
-        ? { min: 38, max: 42 }
-        : { min: 36, max: 40 }
-    : age < 40
-      ? { min: 34, max: 38 }
-      : age < 60
-        ? { min: 32, max: 36 }
-        : { min: 30, max: 34 };
+    ? age < 30
+      ? { min: 37.9, max: 46.7 }
+      : age < 40
+        ? { min: 34.1, max: 44.1 }
+        : age < 50
+          ? { min: 33.1, max: 41.1 }
+          : age < 60
+            ? { min: 31.7, max: 38.5 }
+            : age < 70
+              ? { min: 29.9, max: 37.7 }
+              : { min: 28.7, max: 43.3 }
+    : age < 30
+      ? { min: 28.4, max: 39.8 }
+      : age < 40
+        ? { min: 25.0, max: 36.2 }
+        : age < 50
+          ? { min: 24.2, max: 34.2 }
+          : age < 60
+            ? { min: 24.7, max: 33.5 }
+            : age < 70
+              ? { min: 22.7, max: 31.9 }
+              : { min: 25.5, max: 34.9 };
   const water = M ? { min: 55, max: 65 } : { min: 45, max: 55 };
   const bmi = { min: 18.5, max: 24.9 };
-  const ffmi = M ? { min: 18, max: 22 } : { min: 15, max: 18.5 };
+  const ffmi = M ? { min: 17, max: 20 } : { min: 15, max: 17 };
   return { fat, muscle, water, bmi, ffmi };
 }
 function scoreMetric(val, idealMin, idealMax, worstLow, worstHigh) {
@@ -1725,7 +1740,10 @@ async function saveGoal() {
   if (error) showToast('Errore salvataggio obiettivo', 'error');
 }
 
-function getFocusRate(focus) { return FOCUS_CONFIG[focus]?.rate || 0.60; }
+function getFocusRate(focus) {
+  const deficit = FOCUS_CONFIG[focus]?.deficit ?? FOCUS_CONFIG.moderate.deficit;
+  return (deficit * 7) / KCAL_PER_KG_FAT; // fonti.md § Deficit calorico e ritmo di dimagrimento
+}
 
 function calcGoalEndDate(startDate, startWeight, targetWeight, focus) {
   const diff = startWeight - targetWeight;
@@ -1973,12 +1991,13 @@ function updateGoalPreview() {
     preview.className = 'goal-preview warn'; return;
   }
   const cfg = FOCUS_CONFIG[_selectedFocus];
-  const weeks = Math.ceil(diff / cfg.rate);
+  const rate = getFocusRate(_selectedFocus);
+  const weeks = Math.ceil(diff / rate);
   const projEnd = new Date(); projEnd.setDate(projEnd.getDate() + weeks * 7);
   preview.innerHTML = `
     <strong>−${diff.toFixed(1)} kg</strong> in circa <strong>${weeks} settimane</strong> (~${Math.round(weeks/4.3)} mesi)<br>
     Traguardo stimato: <strong>${projEnd.toLocaleDateString('it-IT',{day:'2-digit',month:'long',year:'numeric'})}</strong><br>
-    Deficit: ~${cfg.deficit} kcal/giorno · ~${(cfg.rate*1000).toFixed(0)} g/settimana<br>
+    Deficit: ~${cfg.deficit} kcal/giorno · ~${(rate*1000).toFixed(0)} g/settimana<br>
     <span style="font-size:10px;opacity:0.7">Fonte: Wishnofsky 1958 (7.700 kcal/kg) · ACSM 2009</span>
   `;
   preview.className = 'goal-preview ok';
