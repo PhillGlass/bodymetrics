@@ -990,23 +990,6 @@ main {
     color: var(--txt3);
 }
 
-.sum-indicator {
-    font-size: 12px;
-    font-family: var(--font-data);
-    min-height: 18px;
-    margin-bottom: 10px;
-    transition: color 0.2s;
-}
-.sum-ok {
-    color: #22c55e;
-}
-.sum-warn {
-    color: #f97316;
-}
-.sum-error {
-    color: #ef4444;
-}
-
 .btn-add {
     width: 100%;
     padding: 11px;

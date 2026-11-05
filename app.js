@@ -36,41 +36,73 @@ const supabaseClient = window.supabase.createClient(
 );
 let currentUser = null;
 
-async function saveProfile() {
-  if (!currentUser) return;
+async function saveProfile(profile = state.profile) {
+  // Restituisce true se il salvataggio è andato a buon fine.
+  if (!currentUser) return false;
   const { error } = await supabaseClient.from("profiles").upsert({
     user_id: currentUser.id,
-    birth_year: state.profile.birthYear,
-    height: state.profile.height,
-    sex: state.profile.sex,
-    activity_level: state.profile.activityLevel,
+    birth_year: profile.birthYear,
+    height: profile.height,
+    sex: profile.sex,
+    activity_level: profile.activityLevel,
   });
-  if (error) showToast("Errore salvataggio profilo", "error");
+  if (error) { showToast("Errore salvataggio profilo", "error"); return false; }
+  return true;
 }
 
-async function saveMeasurements() {
-  // Usata solo per import/cancellazione massiva: riscrive tutte le righe.
-  if (!currentUser) return;
-  const { error: delErr } = await supabaseClient
+const DELETE_CHUNK_SIZE = 100; // id per singola richiesta di cancellazione
+
+async function replaceAllMeasurements(list) {
+  // Sostituisce su Supabase tutte le misurazioni con `list` (import / cancellazione
+  // massiva) in modo fail-safe:
+  //  1) prima upsert delle nuove righe (chiave user_id+date): se fallisce,
+  //     non è stato cancellato nulla;
+  //  2) solo dopo, cancellazione delle righe che non fanno parte di `list`.
+  // Non tocca `state`: restituisce le misurazioni salvate, oppure null se errore.
+  if (!currentUser) return null;
+  let saved = [];
+  if (list.length > 0) {
+    const rows = list.map((m) => ({
+      user_id: currentUser.id,
+      date: m.date,
+      weight: m.weight,
+      fat: m.fat,
+      muscle: m.muscle,
+      water: m.water,
+    }));
+    const { data, error } = await supabaseClient
+      .from("measurements")
+      .upsert(rows, { onConflict: "user_id,date" })
+      .select();
+    if (error) return null;
+    saved = data;
+  }
+  const keepIds = new Set(saved.map((r) => r.id));
+  const { data: existing, error: selErr } = await supabaseClient
     .from("measurements")
-    .delete()
+    .select("id")
     .eq("user_id", currentUser.id);
-  if (delErr) { showToast("Errore salvataggio misurazioni", "error"); return; }
-  if (state.measurements.length === 0) return;
-  const rows = state.measurements.map((m) => ({
-    user_id: currentUser.id,
-    date: m.date,
-    weight: m.weight,
-    fat: m.fat,
-    muscle: m.muscle,
-    water: m.water,
-  }));
-  const { data, error } = await supabaseClient
-    .from("measurements")
-    .insert(rows)
-    .select();
-  if (error) { showToast("Errore salvataggio misurazioni", "error"); return; }
-  state.measurements = data.map(rowToMeasure);
+  if (selErr) return null;
+  const staleIds = existing.map((r) => r.id).filter((id) => !keepIds.has(id));
+  for (let i = 0; i < staleIds.length; i += DELETE_CHUNK_SIZE) {
+    const { error } = await supabaseClient
+      .from("measurements")
+      .delete()
+      .eq("user_id", currentUser.id)
+      .in("id", staleIds.slice(i, i + DELETE_CHUNK_SIZE));
+    if (error) return null;
+  }
+  return saved.map(rowToMeasure);
+}
+
+async function resyncFromServer() {
+  // Dopo un salvataggio parziale fallito: riallinea lo stato locale a
+  // quanto effettivamente presente su Supabase, senza generare nulla.
+  if (await loadUserData()) {
+    loadProfileForm();
+    renderAll();
+    updateGoalButton();
+  }
 }
 
 function rowToMeasure(r) {
@@ -193,6 +225,13 @@ function actLabel(v) {
 }
 
 /* ─── DATE / AGGREGAZIONE ────────────────────── */
+// Data in formato AAAA-MM-GG secondo l'ora locale. toISOString() usa UTC
+// e tra mezzanotte e l'1-2 di notte (ora italiana) restituirebbe il giorno prima.
+function toLocalISODate(d = new Date()) {
+  const mm = String(d.getMonth() + 1).padStart(2, "0");
+  const dd = String(d.getDate()).padStart(2, "0");
+  return `${d.getFullYear()}-${mm}-${dd}`;
+}
 function sorted() {
   return [...state.measurements].sort(
     (a, b) => new Date(a.date) - new Date(b.date),
@@ -255,11 +294,16 @@ function prepareData(range, viewMode) {
   if (viewMode === "yearly") return aggregateYearly(base);
   return base;
 }
-function timeUnitFor(mode, count) {
+function timeUnitFor(mode, data) {
+  // L'unità dell'asse dipende dall'intervallo di date coperto, non dal numero
+  // di punti: poche misure sparse su anni devono mostrare mesi (con l'anno).
   if (mode === "yearly") return "year";
   if (mode === "monthly") return "month";
-  if (count <= 15) return "day";
-  if (count <= 70) return "week";
+  if (data.length < 2) return "day";
+  const spanDays =
+    (new Date(data[data.length - 1].date) - new Date(data[0].date)) / 86400000;
+  if (spanDays <= 31) return "day";
+  if (spanDays <= 180) return "week";
   return "month";
 }
 function fmtTooltipDate(ts, mode) {
@@ -339,6 +383,7 @@ function renderWeightChart() {
       pointBorderWidth: 2,
       fill: true,
       tension: 0.4,
+      cubicInterpolationMode: "monotone", // la curva non supera mai i valori misurati
     },
   ];
   if (chartW) chartW.destroy();
@@ -371,7 +416,7 @@ function renderWeightChart() {
         x: {
           type: "time",
           time: {
-            unit: timeUnitFor(viewW, data.length),
+            unit: timeUnitFor(viewW, data),
             displayFormats: {
               day: "dd/MM",
               week: "dd/MM",
@@ -495,6 +540,7 @@ function renderBodyCompChart() {
     pointBorderWidth: 2,
     fill: true,
     tension: 0.4,
+    cubicInterpolationMode: "monotone", // la curva non supera mai i valori misurati
     hidden: hiddenDatasetsBC.has(label),
     ...extra,
   });
@@ -634,7 +680,7 @@ function renderBodyCompChart() {
         x: {
           type: "time",
           time: {
-            unit: timeUnitFor(viewBC, data.length),
+            unit: timeUnitFor(viewBC, data),
             displayFormats: {
               day: "dd/MM",
               week: "dd/MM",
@@ -707,18 +753,22 @@ function getIdealRanges(age, sex) {
   const ffmi = M ? { min: 17, max: 20 } : { min: 15, max: 17 };
   return { fat, muscle, water, bmi, ffmi };
 }
+// Punteggio assegnato da scoreMetric() a un valore esattamente sul bordo del
+// range ideale: tutti i valori dentro il range hanno punteggio ≥ questa soglia.
+const SCORE_RANGE_EDGE = 70;
+
 function scoreMetric(val, idealMin, idealMax, worstLow, worstHigh) {
   if (val >= idealMin && val <= idealMax) {
     const mid = (idealMin + idealMax) / 2,
       half = (idealMax - idealMin) / 2;
-    return Math.round(100 - (Math.abs(val - mid) / half) * 30);
+    return Math.round(100 - (Math.abs(val - mid) / half) * (100 - SCORE_RANGE_EDGE));
   }
   if (val < idealMin) {
     const r = Math.max(idealMin - worstLow, 0.01);
-    return Math.max(0, Math.round((70 * (val - worstLow)) / r));
+    return Math.max(0, Math.round((SCORE_RANGE_EDGE * (val - worstLow)) / r));
   }
   const r = Math.max(worstHigh - idealMax, 0.01);
-  return Math.max(0, Math.round(70 * (1 - (val - idealMax) / r)));
+  return Math.max(0, Math.round(SCORE_RANGE_EDGE * (1 - (val - idealMax) / r)));
 }
 function renderRadarChart() {
   const s = sorted(),
@@ -779,7 +829,7 @@ function renderRadarChart() {
   el("radar-metrics").innerHTML = metrics
     .map((m, i) => {
       const sc = scores[i],
-        color = sc >= 70 ? "#22c55e" : sc >= 45 ? "#f97316" : "#ef4444";
+        color = sc >= SCORE_RANGE_EDGE ? "#22c55e" : sc >= 45 ? "#f97316" : "#ef4444";
       return `<div class="rm-row" title="Range ideale: ${m.r.min}–${m.r.max}${m.unit}">
                   <div class="rm-key">${m.key}</div>
                   <div class="rm-val">${m.val.toFixed(m.dp)}${m.unit}</div>
@@ -799,7 +849,7 @@ function renderRadarChart() {
       datasets: [
         {
           label: "Zona ideale",
-          data: [85, 85, 85, 85, 85],
+          data: metrics.map(() => SCORE_RANGE_EDGE),
           borderColor: refBrd,
           backgroundColor: dk ? "rgba(255,255,255,0.04)" : "rgba(0,0,0,0.03)",
           borderWidth: 1.5,
@@ -850,7 +900,7 @@ function renderRadarChart() {
             title: (items) => items[0].label,
             label: (item) =>
               item.datasetIndex === 0
-                ? "  Zona ideale: 85/100"
+                ? `  Dentro il range ideale: ≥ ${SCORE_RANGE_EDGE}/100`
                 : `  Valore: ${metrics[item.dataIndex].val.toFixed(1)}${metrics[item.dataIndex].unit}  |  Score: ${scores[item.dataIndex]}/100`,
             afterLabel: (item) =>
               item.datasetIndex !== 1
@@ -1111,33 +1161,89 @@ function exportJSON() {
   const url = URL.createObjectURL(blob),
     a = document.createElement("a");
   a.href = url;
-  a.download = `bodymetrics-${new Date().toISOString().slice(0, 10)}.json`;
+  a.download = `bodymetrics-${toLocalISODate()}.json`;
   a.click();
   URL.revokeObjectURL(url);
   showToast("Dati esportati!", "success");
 }
+const ISO_DATE_RE = /^\d{4}-\d{2}-\d{2}$/;
+const isNum = (v) => typeof v === "number" && Number.isFinite(v);
+
+function parseImportData(data) {
+  // Controllo solo strutturale (presenza campi, tipi, formato data) del JSON
+  // esportato dall'app. Non ripete i limiti min/max dei campi HTML.
+  // Restituisce { profile, measurements, goal } oppure null se il file non è valido.
+  if (!data || typeof data !== "object") return null;
+
+  let measurements = null;
+  if (data.measurements !== undefined) {
+    if (!Array.isArray(data.measurements)) return null;
+    const byDate = new Map(); // una sola misurazione per data (vince l'ultima)
+    for (const m of data.measurements) {
+      if (!m || !ISO_DATE_RE.test(m.date)) return null;
+      if (![m.weight, m.fat, m.muscle, m.water].every(isNum)) return null;
+      byDate.set(m.date, { date: m.date, weight: m.weight, fat: m.fat, muscle: m.muscle, water: m.water });
+    }
+    measurements = [...byDate.values()];
+  }
+
+  let profile = null;
+  if (data.profile) {
+    const p = data.profile;
+    if (![p.birthYear, p.height, p.activityLevel].every(isNum)) return null;
+    if (p.sex !== "M" && p.sex !== "F") return null;
+    profile = { birthYear: p.birthYear, height: p.height, sex: p.sex, activityLevel: p.activityLevel };
+  }
+
+  let goal = null;
+  if (data.goal) {
+    const g = data.goal;
+    if (!FOCUS_CONFIG[g.focus]) return null;
+    if (![g.targetWeight, g.startWeight].every(isNum)) return null;
+    if (!ISO_DATE_RE.test(g.startDate) || !ISO_DATE_RE.test(g.projectedEndDate)) return null;
+    goal = { ...g };
+  }
+
+  return { profile, measurements, goal };
+}
+
 function importJSON(file) {
   const reader = new FileReader();
   reader.onload = async (e) => {
+    let parsed = null;
     try {
-      const data = JSON.parse(e.target.result);
-      if (data.profile)      state.profile      = data.profile;
-      if (data.measurements) state.measurements = data.measurements;
-      // Ripristina obiettivo se presente, altrimenti azzera
-      state.goal = data.goal || null;
-      await saveProfile();
-      await saveMeasurements(); // riscrive tutte le righe su Supabase
-      await saveGoal();
-      // Se era in modalità obiettivo ma non c'è più goal, torna alla normale
-      if (goalMode && !state.goal) { goalMode = false; }
-      loadProfileForm();
-      renderAll();
-      updateGoalButton();
-      const goalMsg = state.goal ? ` + obiettivo "${FOCUS_CONFIG[state.goal.focus]?.label}"` : "";
-      showToast(`Importati ${state.measurements.length} record${goalMsg}!`, "success");
+      parsed = parseImportData(JSON.parse(e.target.result));
     } catch {
-      showToast("File JSON non valido", "error");
+      parsed = null;
     }
+    if (!parsed) { showToast("File JSON non valido", "error"); return; }
+
+    // Salvataggio su Supabase PRIMA di toccare lo stato locale: se qualcosa
+    // fallisce, si riallinea lo stato ai dati realmente presenti sul server.
+    let measurements = state.measurements;
+    if (parsed.measurements) {
+      measurements = await replaceAllMeasurements(parsed.measurements);
+    }
+    const ok =
+      measurements !== null &&
+      (!parsed.profile || (await saveProfile(parsed.profile))) &&
+      (await saveGoal(parsed.goal)); // obiettivo assente nel file → viene rimosso
+    if (!ok) {
+      showToast("Import non completato: ricarico i dati salvati", "error");
+      await resyncFromServer();
+      return;
+    }
+
+    state.measurements = measurements;
+    if (parsed.profile) state.profile = parsed.profile;
+    state.goal = parsed.goal;
+    // Se era in modalità obiettivo ma non c'è più goal, torna alla normale
+    if (goalMode && !state.goal) { goalMode = false; }
+    loadProfileForm();
+    renderAll();
+    updateGoalButton();
+    const goalMsg = state.goal ? ` + obiettivo "${FOCUS_CONFIG[state.goal.focus].label}"` : "";
+    showToast(`Importati ${state.measurements.length} record${goalMsg}!`, "success");
   };
   reader.readAsText(file);
 }
@@ -1198,30 +1304,6 @@ function countUp(id, target, fmt) {
   requestAnimationFrame(tick);
 }
 
-/* ─── FORM VALIDATOR ─────────────────────────── */
-function validateSum() {
-  const f = parseFloat(el("entry-fat").value) || 0,
-    m = parseFloat(el("entry-muscle").value) || 0,
-    w = parseFloat(el("entry-water").value) || 0;
-  if (!f && !m && !w) {
-    el("form-sum").textContent = "";
-    return;
-  }
-  const sum = f + m + w,
-    se = el("form-sum");
-  se.textContent = `Somma: ${sum.toFixed(1)}%`;
-  if (sum >= 95 && sum <= 105) {
-    se.className = "sum-indicator sum-ok";
-    se.textContent += " ✓";
-  } else if (sum < 90 || sum > 112) {
-    se.className = "sum-indicator sum-error";
-    se.textContent += " — controlla i valori";
-  } else {
-    se.className = "sum-indicator sum-warn";
-    se.textContent += " — attenzione";
-  }
-}
-
 /* ─── SHORTHAND ──────────────────────────────── */
 function el(id) {
   return document.getElementById(id);
@@ -1233,40 +1315,11 @@ function closeModal(id) {
   el(id).classList.add("hidden");
 }
 
-/* ─── SAMPLE DATA ────────────────────────────── */
-function generateSampleData() {
-  const data = [],
-    now = new Date();
-  let w = 82.4,
-    fat = 21.8,
-    mus = 42.1;
-  for (let i = 168; i >= 0; i -= 7) {
-    const d = new Date(now);
-    d.setDate(d.getDate() - i);
-    w += (Math.random() - 0.53) * 0.5;
-    fat += (Math.random() - 0.52) * 0.25;
-    mus += (Math.random() - 0.48) * 0.2;
-    w = Math.max(75, Math.min(90, w));
-    fat = Math.max(14, Math.min(30, fat));
-    mus = Math.max(36, Math.min(50, mus));
-    const wat = Math.max(100 - fat - mus - 5, 20);
-    data.push({
-      id: "sample_" + i,
-      date: d.toISOString().slice(0, 10),
-      weight: parseFloat(w.toFixed(1)),
-      fat: parseFloat(fat.toFixed(1)),
-      muscle: parseFloat(mus.toFixed(1)),
-      water: parseFloat(wat.toFixed(1)),
-    });
-  }
-  return data;
-}
-
 /* ═══════════════════════════════════════════════
                EVENT LISTENERS
             ═══════════════════════════════════════════════ */
 function initApp() {
-  el("entry-date").value = new Date().toISOString().slice(0, 10);
+  el("entry-date").value = toLocalISODate();
   loadProfileForm();
   applyTheme(false);
   renderAll();
@@ -1313,8 +1366,13 @@ function initApp() {
   el("btn-clear-data").addEventListener("click", async () => {
     if (!confirm("Sei sicuro? Verranno cancellate TUTTE le misurazioni."))
       return;
-    state.measurements = [];
-    await saveMeasurements();
+    const saved = await replaceAllMeasurements([]);
+    if (saved === null) {
+      showToast("Errore cancellazione misurazioni", "error");
+      await resyncFromServer();
+      return;
+    }
+    state.measurements = saved;
     closeModal("modal-profile");
     renderAll();
     updateGoalButton();
@@ -1323,7 +1381,7 @@ function initApp() {
 
   /* modal aggiungi — pre-compila l'ultimo peso */
   const openAdd = () => {
-    el("entry-date").value = new Date().toISOString().slice(0, 10);
+    el("entry-date").value = toLocalISODate();
     const s = sorted(),
       latest = s[s.length - 1];
     if (latest) {
@@ -1331,13 +1389,11 @@ function initApp() {
       el("entry-fat").value = latest.fat.toFixed(1);
       el("entry-water").value = latest.water.toFixed(1);
       el("entry-muscle").value = latest.muscle.toFixed(1);
-      validateSum();
     } else {
       el("entry-weight").value = "";
       el("entry-fat").value = "";
       el("entry-water").value = "";
       el("entry-muscle").value = "";
-      el("form-sum").textContent = "";
     }
     openModal("modal-add");
   };
@@ -1350,28 +1406,20 @@ function initApp() {
 
   el("form-entry").addEventListener("submit", (e) => {
     e.preventDefault();
-    const fat = parseFloat(el("entry-fat").value),
-      muscle = parseFloat(el("entry-muscle").value),
-      water = parseFloat(el("entry-water").value);
-    if (fat + muscle + water > 125) {
-      showToast("Somma percentuali troppo alta", "error");
-      return;
-    }
+    // Nessun controllo sulla somma grasso+muscolo+acqua: i tre compartimenti
+    // si sovrappongono (l'acqua è contenuta anche nel muscolo), quindi la
+    // somma non deve valere 100%. I limiti restano i min/max dei campi HTML.
     addMeasure({
       date: el("entry-date").value,
       weight: parseFloat(el("entry-weight").value),
-      fat,
-      muscle,
-      water,
+      fat: parseFloat(el("entry-fat").value),
+      muscle: parseFloat(el("entry-muscle").value),
+      water: parseFloat(el("entry-water").value),
     });
     el("form-entry").reset();
-    el("entry-date").value = new Date().toISOString().slice(0, 10);
-    el("form-sum").textContent = "";
+    el("entry-date").value = toLocalISODate();
     closeModal("modal-add");
   });
-  ["entry-fat", "entry-muscle", "entry-water"].forEach((id) =>
-    el(id).addEventListener("input", validateSum),
-  );
 
   /* ─── GESTIONE SINCRONIZZATA FILTRI (Desktop & Mobile) ───
      Le selezioni Giorno/Mese/Anno e Periodo (1M/3M/…) sono condivise tra
@@ -1551,7 +1599,7 @@ function initApp() {
     const s = sorted(), latest = s[s.length-1];
     if (!latest || isNaN(targetW) || targetW <= 0) { showToast('Inserisci un peso obiettivo valido', 'error'); return; }
     if (targetW >= latest.weight) { showToast('L\'obiettivo deve essere inferiore al peso attuale', 'error'); return; }
-    const startDate = new Date().toISOString().slice(0,10);
+    const startDate = toLocalISODate();
     state.goal = {
       targetWeight: targetW,
       focus: _selectedFocus,
@@ -1718,14 +1766,14 @@ document.addEventListener("DOMContentLoaded", bootstrapAuth);
 let _selectedFocus = 'moderate';
 let goalMode = false;
 
-async function saveGoal() {
-  if (!currentUser) return;
-  if (state.goal === null) {
+async function saveGoal(g = state.goal) {
+  // Restituisce true se il salvataggio (o la rimozione) è andato a buon fine.
+  if (!currentUser) return false;
+  if (g === null) {
     const { error } = await supabaseClient.from('goals').delete().eq('user_id', currentUser.id);
-    if (error) showToast('Errore rimozione obiettivo', 'error');
-    return;
+    if (error) { showToast('Errore rimozione obiettivo', 'error'); return false; }
+    return true;
   }
-  const g = state.goal;
   const { error } = await supabaseClient.from('goals').upsert({
     user_id: currentUser.id,
     target_weight: g.targetWeight,
@@ -1737,7 +1785,8 @@ async function saveGoal() {
     daily_deficit: g.dailyDeficit,
     set_at: g.setAt,
   });
-  if (error) showToast('Errore salvataggio obiettivo', 'error');
+  if (error) { showToast('Errore salvataggio obiettivo', 'error'); return false; }
+  return true;
 }
 
 function getFocusRate(focus) {
@@ -1751,29 +1800,7 @@ function calcGoalEndDate(startDate, startWeight, targetWeight, focus) {
   const weeks = Math.ceil(diff / getFocusRate(focus));
   const d = new Date(startDate + 'T12:00:00');
   d.setDate(d.getDate() + weeks * 7);
-  return d.toISOString().slice(0, 10);
-}
-
-function generateSampleGoal(measurements) {
-  const s = [...measurements].sort((a,b) => new Date(a.date)-new Date(b.date));
-  const oneMonthAgo = new Date();
-  oneMonthAgo.setMonth(oneMonthAgo.getMonth() - 1);
-  // Trova la misurazione più vicina a 1 mese fa
-  const startM = s.reduce((prev, curr) =>
-    Math.abs(new Date(curr.date) - oneMonthAgo) < Math.abs(new Date(prev.date) - oneMonthAgo) ? curr : prev
-  );
-  const startWeight = startM.weight;
-  const targetWeight = parseFloat((startWeight - 7).toFixed(1));
-  const focus = 'moderate';
-  const projectedEndDate = calcGoalEndDate(startM.date, startWeight, targetWeight, focus);
-  return {
-    targetWeight, focus, startWeight,
-    startDate: startM.date,
-    projectedEndDate,
-    weeklyRate: getFocusRate(focus),
-    dailyDeficit: FOCUS_CONFIG[focus].deficit,
-    setAt: new Date().toISOString(),
-  };
+  return toLocalISODate(d);
 }
 
 /* ── Rendering chart in modalità obiettivo ─── */
@@ -1795,7 +1822,7 @@ function renderGoalModeChart() {
     ? new Date(actual[actual.length - 1].date + 'T12:00:00')
     : projStart;
   const effectiveEnd = lastActualDate > projEnd ? lastActualDate : projEnd;
-  const effectiveEndStr = effectiveEnd.toISOString().slice(0, 10);
+  const effectiveEndStr = toLocalISODate(effectiveEnd);
 
   // Proiezione adattativa: peso(t) = target + (start - target) * (1 - t/T)^1.4
   // Fonte e motivazione dell'esponente: fonti.md § Proiezione adattativa del calo peso
@@ -1804,7 +1831,7 @@ function renderGoalModeChart() {
   for (let day = 0; day <= totalDays; day += steps) {
     const d = new Date(projStart); d.setDate(d.getDate() + day);
     const factor = Math.pow(1 - day / totalDays, 1.4);
-    proj.push({ x: d.toISOString().slice(0,10), y: parseFloat((goal.targetWeight + totalLoss * factor).toFixed(2)) });
+    proj.push({ x: toLocalISODate(d), y: parseFloat((goal.targetWeight + totalLoss * factor).toFixed(2)) });
   }
   proj.push({ x: goal.projectedEndDate, y: goal.targetWeight });
   // Oltre la data prevista, la proiezione prosegue piatta sul peso obiettivo
@@ -1828,7 +1855,7 @@ function renderGoalModeChart() {
           data: actual.map(d=>({ x:d.date, y:d.weight })),
           borderColor: '#3b82f6', backgroundColor: grad, borderWidth: 2.5,
           pointRadius: 5, pointHoverRadius: 8, pointBackgroundColor: '#3b82f6',
-          pointBorderColor: c.ptBrd, pointBorderWidth: 2, fill: true, tension: 0.4, order:1,
+          pointBorderColor: c.ptBrd, pointBorderWidth: 2, fill: true, tension: 0.4, cubicInterpolationMode: 'monotone', order:1,
         },
         {
           label: `Proiezione adattativa (${focusCfg.label})`,
@@ -1904,9 +1931,14 @@ function toggleGoalMode() {
     ? '<i class="fas fa-chart-area"></i> Normale'
     : '<i class="fas fa-route"></i> Obiettivo';
   // Mostra/nascondi selettori range e view
-  const rangeW = document.getElementById('range-weight');
-  const viewW  = document.getElementById('view-weight');
-  [rangeW, viewW].forEach(el => { if(el) el.style.opacity = goalMode ? '0.3' : ''; el && (el.style.pointerEvents = goalMode ? 'none' : ''); });
+  // (nomi locali distinti da rangeW/viewW, che sono lo stato globale dei filtri)
+  const rangePills = el('range-weight');
+  const viewPills  = el('view-weight');
+  [rangePills, viewPills].forEach(e => {
+    if (!e) return;
+    e.style.opacity = goalMode ? '0.3' : '';
+    e.style.pointerEvents = goalMode ? 'none' : '';
+  });
   if (goalMode) renderGoalModeChart();
   else          renderWeightChart();
 }
