@@ -18,6 +18,11 @@ const FOCUS_CONFIG = {
   aggressive: { label:'Intensivo', sub:'Impegnativo', deficit:850,  color:'#f97316' },
 };
 
+// Apporto calorico minimo per sesso durante l'obiettivo: limite inferiore degli
+// apporti prescritti da Jensen et al. 2013 (AHA/ACC/TOS)
+// — fonti.md § Apporto calorico minimo nell'obiettivo
+const MIN_DAILY_KCAL = { M: 1500, F: 1200 };
+
 let state = {
   profile: { ...DEFAULT_PROFILE },
   measurements: [],
@@ -1599,15 +1604,17 @@ function initApp() {
     const s = sorted(), latest = s[s.length-1];
     if (!latest || isNaN(targetW) || targetW <= 0) { showToast('Inserisci un peso obiettivo valido', 'error'); return; }
     if (targetW >= latest.weight) { showToast('L\'obiettivo deve essere inferiore al peso attuale', 'error'); return; }
+    const plan = calcGoalPlan(calcTDEEFor(latest, state.profile), state.profile.sex, _selectedFocus);
+    if (plan.deficit <= 0) { showToast('Fabbisogno già al minimo calorico: deficit non possibile', 'error'); return; }
     const startDate = toLocalISODate();
     state.goal = {
       targetWeight: targetW,
       focus: _selectedFocus,
       startWeight: latest.weight,
       startDate,
-      projectedEndDate: calcGoalEndDate(startDate, latest.weight, targetW, _selectedFocus),
-      weeklyRate: getFocusRate(_selectedFocus),
-      dailyDeficit: FOCUS_CONFIG[_selectedFocus].deficit,
+      projectedEndDate: calcGoalEndDate(startDate, latest.weight, targetW, plan.rate),
+      weeklyRate: plan.rate,
+      dailyDeficit: plan.deficit, // deficit effettivo (già ridotto se interviene il minimo)
       setAt: new Date().toISOString(),
     };
     saveGoal();
@@ -1789,15 +1796,39 @@ async function saveGoal(g = state.goal) {
   return true;
 }
 
-function getFocusRate(focus) {
-  const deficit = FOCUS_CONFIG[focus]?.deficit ?? FOCUS_CONFIG.moderate.deficit;
-  return (deficit * 7) / KCAL_PER_KG_FAT; // fonti.md § Deficit calorico e ritmo di dimagrimento
+function rateFromDeficit(deficit) {
+  // kg/settimana da un deficit giornaliero — fonti.md § Deficit calorico e ritmo di dimagrimento
+  return (deficit * 7) / KCAL_PER_KG_FAT;
 }
 
-function calcGoalEndDate(startDate, startWeight, targetWeight, focus) {
+function calcGoalPlan(tdee, sex, focus) {
+  // Piano calorico per il ritmo scelto. Se TDEE − deficit scenderebbe sotto il
+  // minimo per sesso, l'apporto viene portato al minimo e il deficit si riduce
+  // di conseguenza: ritmo e data-traguardo usano sempre il deficit effettivo.
+  const nominalDeficit = (FOCUS_CONFIG[focus] ?? FOCUS_CONFIG.moderate).deficit;
+  const minIntake = MIN_DAILY_KCAL[sex] ?? MIN_DAILY_KCAL.F;
+  const intake = Math.max(minIntake, Math.round(tdee - nominalDeficit));
+  const deficit = Math.max(0, Math.round(tdee) - intake);
+  return {
+    nominalDeficit,
+    deficit,
+    intake,
+    minIntake,
+    capped: deficit < nominalDeficit,
+    rate: rateFromDeficit(deficit),
+  };
+}
+
+function calcTDEEFor(m, profile) {
+  // TDEE per una misurazione e un profilo (riusa calcTDEE)
+  return calcTDEE(m.weight, profile.height, getAge(profile.birthYear), profile.sex, profile.activityLevel);
+}
+
+function calcGoalEndDate(startDate, startWeight, targetWeight, weeklyRate) {
   const diff = startWeight - targetWeight;
   if (diff <= 0) return startDate;
-  const weeks = Math.ceil(diff / getFocusRate(focus));
+  if (weeklyRate <= 0) return null; // nessun deficit possibile: traguardo non stimabile
+  const weeks = Math.ceil(diff / weeklyRate);
   const d = new Date(startDate + 'T12:00:00');
   d.setDate(d.getDate() + weeks * 7);
   return toLocalISODate(d);
@@ -1907,11 +1938,11 @@ function updateGoalInfoBar() {
   const alreadyLost = goal.startWeight - latest.weight;
   const pct = totalToLose > 0 ? Math.max(0, Math.min(100, (alreadyLost / totalToLose) * 100)) : 0;
   const remaining = Math.max(0, latest.weight - goal.targetWeight);
-  // Calorie giornaliere da assumere = TDEE attuale - deficit scelto
+  // Calorie giornaliere da assumere = TDEE attuale − deficit dell'obiettivo,
+  // mai sotto il minimo per sesso (fonti.md § Apporto calorico minimo nell'obiettivo)
   const p = state.profile;
-  const age = getAge(p.birthYear);
-  const currentTDEE = calcTDEE(latest.weight, p.height, age, p.sex, p.activityLevel);
-  const dailyCals = Math.max(1200, Math.round(currentTDEE - goal.dailyDeficit));
+  const minIntake = MIN_DAILY_KCAL[p.sex] ?? MIN_DAILY_KCAL.F;
+  const dailyCals = Math.max(minIntake, Math.round(calcTDEEFor(latest, p) - goal.dailyDeficit));
   el('gib-start').textContent     = goal.startWeight.toFixed(1) + ' kg';
   el('gib-target').textContent    = goal.targetWeight.toFixed(1) + ' kg';
   el('gib-remaining').textContent = remaining.toFixed(1) + ' kg';
@@ -2005,7 +2036,7 @@ function renderGoalSummary() {
   el('goal-summary-card').innerHTML = `
     <div class="gs-row"><span class="gs-label">Obiettivo</span><span class="gs-val green">${goal.targetWeight} kg (−${totalToLose.toFixed(1)} kg)</span></div>
     <div class="gs-row"><span class="gs-label">Partenza</span><span class="gs-val">${fmtDateIT(goal.startDate)} · ${goal.startWeight} kg</span></div>
-    <div class="gs-row"><span class="gs-label">Ritmo</span><span class="gs-val orange">${focusCfg.label} — ~${focusCfg.deficit} kcal/giorno</span></div>
+    <div class="gs-row"><span class="gs-label">Ritmo</span><span class="gs-val orange">${focusCfg.label} — ~${goal.dailyDeficit} kcal/giorno${goal.dailyDeficit < focusCfg.deficit ? ' (ridotto dal minimo calorico)' : ''}</span></div>
     <div class="gs-row"><span class="gs-label">Traguardo stimato</span><span class="gs-val">${fmtDateIT(goal.projectedEndDate)}</span></div>
     <div class="gs-row"><span class="gs-label">Progresso</span><span class="gs-val">${alreadyLost.toFixed(1)} kg persi · ${pct.toFixed(0)}%</span></div>
     <div class="gs-progress-wrap"><div class="gs-progress-bar" style="width:${pct}%"></div></div>
@@ -2023,14 +2054,23 @@ function updateGoalPreview() {
     preview.className = 'goal-preview warn'; return;
   }
   const cfg = FOCUS_CONFIG[_selectedFocus];
-  const rate = getFocusRate(_selectedFocus);
-  const weeks = Math.ceil(diff / rate);
+  const tdee = calcTDEEFor(latest, state.profile);
+  const plan = calcGoalPlan(tdee, state.profile.sex, _selectedFocus);
+  if (plan.deficit <= 0) {
+    preview.innerHTML = `⚠ Il tuo fabbisogno (${tdee.toLocaleString('it-IT')} kcal) è già al minimo consigliato di ${plan.minIntake.toLocaleString('it-IT')} kcal/giorno: con questo profilo non è possibile un deficit.`;
+    preview.className = 'goal-preview warn'; return;
+  }
+  const weeks = Math.ceil(diff / plan.rate);
   const projEnd = new Date(); projEnd.setDate(projEnd.getDate() + weeks * 7);
+  const cappedNote = plan.capped
+    ? `⚠ Con il ritmo ${cfg.label} (−${plan.nominalDeficit} kcal) scenderesti sotto il minimo di ${plan.minIntake.toLocaleString('it-IT')} kcal/giorno: deficit ridotto a ${plan.deficit} kcal.<br>`
+    : '';
   preview.innerHTML = `
     <strong>−${diff.toFixed(1)} kg</strong> in circa <strong>${weeks} settimane</strong> (~${Math.round(weeks/4.3)} mesi)<br>
     Traguardo stimato: <strong>${projEnd.toLocaleDateString('it-IT',{day:'2-digit',month:'long',year:'numeric'})}</strong><br>
-    Deficit: ~${cfg.deficit} kcal/giorno · ~${(rate*1000).toFixed(0)} g/settimana<br>
-    <span style="font-size:10px;opacity:0.7">Fonte: Wishnofsky 1958 (7.700 kcal/kg) · ACSM 2009</span>
+    Deficit: ~${plan.deficit} kcal/giorno · ~${(plan.rate*1000).toFixed(0)} g/settimana · Apporto: ~${plan.intake.toLocaleString('it-IT')} kcal/giorno<br>
+    ${cappedNote}
+    <span style="font-size:10px;opacity:0.7">Fonte: Wishnofsky 1958 (7.700 kcal/kg) · ACSM 2009 · AHA/ACC/TOS 2013</span>
   `;
   preview.className = 'goal-preview ok';
 }
