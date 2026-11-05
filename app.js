@@ -11,11 +11,13 @@ const DEFAULT_PROFILE = {
 // Wishnofsky (1958): 1 kg di massa grassa ≈ 7700 kcal — fonti.md § Deficit calorico e ritmo di dimagrimento
 const KCAL_PER_KG_FAT = 7700;
 
-// Configurazione focus obiettivo — fonti e derivazione dei valori: fonti.md § Deficit calorico e ritmo di dimagrimento
+// Configurazione focus obiettivo. Deficit giornalieri presi dalle linee guida:
+// 300 = NHLBI 1998 (limite inferiore 300–500), 500 e 750 = AHA/ACC/TOS 2013
+// — fonti.md § Deficit calorico e ritmo di dimagrimento
 const FOCUS_CONFIG = {
-  gradual:    { label:'Graduale',  sub:'Sostenibile', deficit:375,  color:'#22c55e' },
-  moderate:   { label:'Moderato',  sub:'Consigliato', deficit:625,  color:'#3b82f6' },
-  aggressive: { label:'Intensivo', sub:'Impegnativo', deficit:850,  color:'#f97316' },
+  gradual:    { label:'Graduale',  sub:'Sostenibile', deficit:300,  color:'#22c55e' },
+  moderate:   { label:'Moderato',  sub:'Consigliato', deficit:500,  color:'#3b82f6' },
+  aggressive: { label:'Intensivo', sub:'Impegnativo', deficit:750,  color:'#f97316' },
 };
 
 // Apporto calorico minimo per sesso durante l'obiettivo: limite inferiore degli
@@ -2070,7 +2072,7 @@ function updateGoalPreview() {
     Traguardo stimato: <strong>${projEnd.toLocaleDateString('it-IT',{day:'2-digit',month:'long',year:'numeric'})}</strong><br>
     Deficit: ~${plan.deficit} kcal/giorno · ~${(plan.rate*1000).toFixed(0)} g/settimana · Apporto: ~${plan.intake.toLocaleString('it-IT')} kcal/giorno<br>
     ${cappedNote}
-    <span style="font-size:10px;opacity:0.7">Fonte: Wishnofsky 1958 (7.700 kcal/kg) · ACSM 2009 · AHA/ACC/TOS 2013</span>
+    <span style="font-size:10px;opacity:0.7">Fonte: Wishnofsky 1958 (7.700 kcal/kg) · NHLBI 1998 · AHA/ACC/TOS 2013</span>
   `;
   preview.className = 'goal-preview ok';
 }
